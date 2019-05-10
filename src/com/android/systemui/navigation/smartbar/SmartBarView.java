@@ -81,7 +81,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Set;
 
-public class SmartBarView extends BaseNavigationBar {
+public class SmartBarView extends BaseNavigationBar implements PulseController.PulseStateListener {
     final static boolean DEBUG = false;
     final static String TAG = SmartBarView.class.getSimpleName();
     final static int PULSE_FADE_OUT_DURATION = 250;
@@ -210,6 +210,7 @@ public class SmartBarView extends BaseNavigationBar {
                 return true;
             }
         });
+        mPulse.setStateListener(this);
     }
 
     private final OnTouchListener mSmartBarTouchListener = new OnTouchListener() {
@@ -242,18 +243,6 @@ public class SmartBarView extends BaseNavigationBar {
     public void setMediaPlaying(boolean playing) {
         mIsMediaPlaying = playing;
         setNavigationIconHints(mNavigationIconHints, true);
-        PulseController mPulse = getPulseController();
-        if (mPulse != null) {
-            mPulse.setMediaPlaying(playing);
-        }
-    }
-
-    @Override
-    public void setPulseColors(boolean colorizedMedia, int[] colors) {
-        PulseController mPulse = getPulseController();
-        if (mPulse != null) {
-            mPulse.setPulseColors(colorizedMedia, colors);
-        }
     }
 
     ArrayList<String> getCurrentSequence() {
@@ -805,14 +794,6 @@ public class SmartBarView extends BaseNavigationBar {
         return v;
     }
 
-    boolean isBarPulseFaded() {
-        if (mPulse == null) {
-            return false;
-        } else {
-            return mPulse.shouldDrawPulse();
-        }
-    }
-
     private void updateButtonAlpha() {
         mCustomAlpha = alphaIntToFloat(Settings.Secure.getIntForUser(getContext().getContentResolver(),
                 Settings.Secure.NAVBAR_BUTTONS_ALPHA, 255, UserHandle.USER_CURRENT));
@@ -822,7 +803,7 @@ public class SmartBarView extends BaseNavigationBar {
     private void setButtonAlpha() {
         // only set this if pulse is not running. If pulse is running
         // we will set proper alpha when it ends
-        if (!isBarPulseFaded()) {
+        if (!mPulse.shouldDrawPulse()) {
             final View currentNavButtons = getCurrentView().findViewWithTag(Res.Common.NAV_BUTTONS);
             final View hiddenNavButtons = getHiddenView().findViewWithTag(Res.Common.NAV_BUTTONS);
             final float fadeAlpha = mCustomAlpha;
@@ -834,7 +815,7 @@ public class SmartBarView extends BaseNavigationBar {
     private void updatePulseNavButtonsOpacity() {
         mPulseNavButtonsOpacity = alphaIntToFloat(Settings.Secure.getIntForUser(getContext().getContentResolver(),
                 Settings.Secure.PULSE_CUSTOM_BUTTONS_OPACITY, 200, UserHandle.USER_CURRENT));
-        if (isBarPulseFaded()) {
+        if (mPulse.shouldDrawPulse()) {
             final View currentNavButtons = getCurrentView().findViewWithTag(Res.Common.NAV_BUTTONS);
             final View hiddenNavButtons = getHiddenView().findViewWithTag(Res.Common.NAV_BUTTONS);
             currentNavButtons.setAlpha(mPulseNavButtonsOpacity);
@@ -843,7 +824,7 @@ public class SmartBarView extends BaseNavigationBar {
     }
 
     @Override
-    public boolean onStartPulse(Animation animatePulseIn) {
+    public boolean onStartPulse() {
         if (mEditor.getMode() == BaseEditor.MODE_ON) {
             mEditor.changeEditMode(BaseEditor.MODE_OFF);
         }
@@ -860,10 +841,7 @@ public class SmartBarView extends BaseNavigationBar {
                 .setListener(new AnimatorListenerAdapter() {
                     @Override
                     public void onAnimationEnd(Animator _a) {
-                        // shouldn't be null, mPulse just called into us
-                        if (mPulse != null) {
-                            mPulse.turnOnPulse();
-                        }
+                        mPulse.turnOnPulse();
                     }
                 })
                 .start();
@@ -871,7 +849,7 @@ public class SmartBarView extends BaseNavigationBar {
     }
 
     @Override
-    public void onStopPulse(Animation animatePulseOut) {
+    public void onStopPulse() {
         final View currentNavButtons = getCurrentView().findViewWithTag(Res.Common.NAV_BUTTONS);
         final View hiddenNavButtons = getHiddenView().findViewWithTag(Res.Common.NAV_BUTTONS);
         final float fadeAlpha = mCustomAlpha;

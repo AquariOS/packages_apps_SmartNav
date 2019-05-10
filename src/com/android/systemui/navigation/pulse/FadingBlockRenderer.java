@@ -36,7 +36,7 @@ import android.util.TypedValue;
 
 import com.android.internal.util.NotificationColorUtil;
 import com.android.systemui.R;
-import com.android.systemui.navigation.pulse.PulseController.PulseObserver;
+import com.android.systemui.navigation.pulse.PulseController.PulseHost;
 import com.android.systemui.navigation.utils.ColorAnimator;
 
 public class FadingBlockRenderer extends Renderer implements ColorAnimator.ColorAnimationListener {
@@ -71,7 +71,7 @@ public class FadingBlockRenderer extends Renderer implements ColorAnimator.Color
 
     private PulseController mController;
 
-    public FadingBlockRenderer(Context context, Handler handler, PulseObserver callback,
+    public FadingBlockRenderer(Context context, Handler handler, PulseHost callback,
             PulseController controller) {
         super(context, handler, callback);
         mController = controller;

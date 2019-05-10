@@ -24,11 +24,15 @@
 
 package com.android.systemui.navigation.pulse;
 
+import com.android.systemui.Dependency;
+import com.android.systemui.SysUiServiceProvider;
 import com.android.systemui.navigation.pulse.PulseController;
 
+import android.content.BroadcastReceiver;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.database.ContentObserver;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
@@ -47,17 +51,25 @@ import android.provider.Settings;
 import android.util.Log;
 import android.view.animation.Animation;
 
-public class PulseController {
-    public interface PulseObserver {
+import com.android.systemui.statusbar.CommandQueue;
+import com.android.systemui.statusbar.NotificationMediaManager;
+import com.android.systemui.statusbar.CommandQueue.Callbacks;
+import com.android.systemui.statusbar.phone.StatusBar;
+import com.android.systemui.statusbar.policy.KeyguardMonitor;
+
+public class PulseController implements CommandQueue.Callbacks, KeyguardMonitor.Callback, NotificationMediaManager.MediaUpdateListener {
+    public interface PulseHost {
         public int getWidth();
         public int getHeight();
         public void postInvalidate();
+    }
 
+    public interface PulseStateListener {
         // return false to immediately begin Pulse
         // return true to do pre-processing. Implementation MUST
         // call startDrawing() after processing
-        public boolean onStartPulse(Animation animatePulseIn);
-        public void onStopPulse(Animation animatePulseOut);
+        public boolean onStartPulse();
+        public void onStopPulse();
     }
 
     private static final String TAG = PulseController.class.getSimpleName();
@@ -69,48 +81,62 @@ public class PulseController {
     private AudioManager mAudioManager;
     private Renderer mRenderer;
     private VisualizerStreamHandler mStreamHandler;
-    private PulseObserver mPulseObserver;
+    private PulseHost mHost;
+    private PulseStateListener mStateListener;
     private SettingsObserver mSettingsObserver;
+    private KeyguardMonitor mKeyguardMonitor;
+    //TODO: Go back to self-reliance for media states
+    private NotificationMediaManager mMediaManager;
     private Bitmap mAlbumArt;
     private int mAlbumArtColor = -1;
     private boolean mPulseEnabled;
-    private boolean mKeyguardShowing;
+    private boolean mKeyguardShowing = true;
     private boolean mLinked;
     private boolean mPowerSaveModeEnabled;
-    private boolean mScreenOn;
+    private boolean mScreenOn = true;
     private boolean mMusicStreamMuted;
     private boolean mLeftInLandscape;
     private boolean mScreenPinningEnabled;
     private int mPulseStyle;
     private boolean mIsMediaPlaying;
 
-    public void onReceive(Intent intent) {
-        if (PowerManager.ACTION_POWER_SAVE_MODE_CHANGING.equals(intent.getAction())) {
-            mPowerSaveModeEnabled = intent.getBooleanExtra(PowerManager.EXTRA_POWER_SAVE_MODE,
-                    false);
-            mHandler.post(new Runnable() {
-                @Override
-                public void run() {
-                    doLinkage();
-                }
-            });
-        } else if (AudioManager.STREAM_MUTE_CHANGED_ACTION.equals(intent.getAction())
-                || (AudioManager.VOLUME_CHANGED_ACTION.equals(intent.getAction()))) {
-            int streamType = intent.getIntExtra(AudioManager.EXTRA_VOLUME_STREAM_TYPE, -1);
-            if (streamType == AudioManager.STREAM_MUSIC) {
-                boolean muted = isMusicMuted(streamType);
-                if (mMusicStreamMuted != muted) {
-                    mMusicStreamMuted = muted;
-                    mHandler.post(new Runnable() {
-                        @Override
-                        public void run() {
-                            doLinkage();
-                        }
-                    });
+    private final BroadcastReceiver mBroadcastReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            String action = intent.getAction();
+            if (Intent.ACTION_SCREEN_OFF.equals(action)) {
+                mScreenOn = false;
+                doLinkage();
+            } else if (Intent.ACTION_SCREEN_ON.equals(action)) {
+                mScreenOn = true;
+                doLinkage();
+            } else if (PowerManager.ACTION_POWER_SAVE_MODE_CHANGING.equals(intent.getAction())) {
+                mPowerSaveModeEnabled = intent.getBooleanExtra(PowerManager.EXTRA_POWER_SAVE_MODE,
+                        false);
+                mHandler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        doLinkage();
+                    }
+                });
+            } else if (AudioManager.STREAM_MUTE_CHANGED_ACTION.equals(intent.getAction())
+                    || (AudioManager.VOLUME_CHANGED_ACTION.equals(intent.getAction()))) {
+                int streamType = intent.getIntExtra(AudioManager.EXTRA_VOLUME_STREAM_TYPE, -1);
+                if (streamType == AudioManager.STREAM_MUSIC) {
+                    boolean muted = isMusicMuted(streamType);
+                    if (mMusicStreamMuted != muted) {
+                        mMusicStreamMuted = muted;
+                        mHandler.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                doLinkage();
+                            }
+                        });
+                    }
                 }
             }
         }
-    }
+    };
 
     private final VisualizerStreamHandler.Listener mStreamListener = new VisualizerStreamHandler.Listener() {
         @Override
@@ -119,7 +145,7 @@ public class PulseController {
                 mRenderer.onStreamAnalyzed(isValid);
             }
             if (isValid) {
-                if (!mPulseObserver.onStartPulse(null)) {
+                if (mStateListener == null || !mStateListener.onStartPulse()) {
                     turnOnPulse();
                 }
             } else {
@@ -163,7 +189,7 @@ public class PulseController {
                 doLinkage();
             } else if (uri.equals(Settings.Secure.getUriFor(Settings.Secure.PULSE_RENDER_STYLE_URI))) {
                 updateRenderMode();
-                if (mPulseObserver != null) {
+                if (mHost != null) {
                     loadRenderer();
                 }
             }
@@ -198,18 +224,34 @@ public class PulseController {
 
         mSettingsObserver.register();
         mStreamHandler = new VisualizerStreamHandler(mContext, this, mStreamListener);
+        SysUiServiceProvider.getComponent(context, CommandQueue.class).addCallbacks(this);
+        mKeyguardMonitor = Dependency.get(KeyguardMonitor.class);
+        mKeyguardMonitor.addCallback(this);
+        mMediaManager = SysUiServiceProvider.getComponent(context, StatusBar.class).getMediaManager();
+        mMediaManager.addCallback(this);
+        IntentFilter filter = new IntentFilter(Intent.ACTION_SCREEN_OFF);
+        filter.addAction(Intent.ACTION_SCREEN_ON);
+        filter.addAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGING);
+        filter.addAction(AudioManager.STREAM_MUTE_CHANGED_ACTION);
+        filter.addAction(AudioManager.VOLUME_CHANGED_ACTION);
+        context.registerReceiverAsUser(mBroadcastReceiver, UserHandle.ALL, filter, null, null);
     }
 
-    public void setPulseObserver(PulseObserver observer) {
-        mPulseObserver = observer;
+    public void setHost(PulseHost host) {
+        mHost = host;
         loadRenderer();
-        // why not check for linkage? No need! If this is a bar
-        // change, PhoneStatusBar will call notifyInflateFromUser()
-        // which calls notifyScreenOn ;D
+        doLinkage();
+    }
+
+    public void setStateListener(PulseStateListener stateListener) {
+        mStateListener = stateListener;
+        if (shouldDrawPulse()) {
+            stateListener.onStartPulse();
+        }
     }
 
     private void loadRenderer() {
-        if (mPulseObserver == null) {
+        if (mHost == null) {
             return;
         }
         final boolean isRendering = shouldDrawPulse();
@@ -220,7 +262,7 @@ public class PulseController {
             mRenderer.destroy();
             mRenderer = null;
         }
-        mRenderer = getRenderer(mPulseObserver);
+        mRenderer = getRenderer(mHost);
         mRenderer.setLeftInLandscape(mLeftInLandscape);
         if (isRendering) {
             mRenderer.onStreamAnalyzed(true);
@@ -228,25 +270,24 @@ public class PulseController {
         }
     }
 
-    public void setScreenPinningState(boolean enabled) {
+    @Override
+    public void screenPinningStateChanged(boolean enabled) {
         mScreenPinningEnabled = enabled;
-    }
-
-    public void setKeyguardShowing(boolean showing) {
-        mKeyguardShowing = showing;
         doLinkage();
     }
 
-    public void notifyScreenOn(boolean screenOn) {
-        mScreenOn = screenOn;
+    @Override
+    public void onKeyguardShowingChanged() {
+        mKeyguardShowing = mKeyguardMonitor.isSecure();
         doLinkage();
     }
 
-    public void setLeftInLandscape(boolean leftInLandscape) {
-        if (mLeftInLandscape != leftInLandscape) {
-            mLeftInLandscape = leftInLandscape;
+    @Override
+    public void leftInLandscapeChanged(boolean isLeft) {
+        if (mLeftInLandscape != isLeft) {
+            mLeftInLandscape = isLeft;
             if (mRenderer != null) {
-                mRenderer.setLeftInLandscape(leftInLandscape);
+                mRenderer.setLeftInLandscape(isLeft);
             }
         }
     }
@@ -294,22 +335,24 @@ public class PulseController {
                 if (mRenderer != null) {
                     mRenderer.onVisualizerLinkChanged(false);
                 }
-                if (mPulseObserver != null) {
-                    mPulseObserver.postInvalidate();
-                    mPulseObserver.onStopPulse(null);
+                if (mHost != null) {
+                    mHost.onPrepareToDraw();
+                    if (mStateListener != null) {
+                        mStateListener.onStopPulse();
+                    }
                 }
             }
         }
     }
 
-    private Renderer getRenderer(PulseObserver observer) {
+    private Renderer getRenderer(PulseHost host) {
         switch (mPulseStyle) {
             case RENDER_STYLE_LEGACY:
-                return new FadingBlockRenderer(mContext, mHandler, observer, this);
+                return new FadingBlockRenderer(mContext, mHandler, host, this);
             case RENDER_STYLE_CM:
-                return new SolidLineRenderer(mContext, mHandler, observer, this);
+                return new SolidLineRenderer(mContext, mHandler, host, this);
             default:
-                return new FadingBlockRenderer(mContext, mHandler, observer, this);
+                return new FadingBlockRenderer(mContext, mHandler, host, this);
         }
     }
 
@@ -419,13 +462,15 @@ public class PulseController {
         }
     }
 
-    public void setMediaPlaying(boolean playing) {
+    @Override
+    public void onMediaUpdated(boolean playing) {
         if (mIsMediaPlaying != playing) {
             mIsMediaPlaying = playing;
             doLinkage();
         }
     }
 
+    @Override
     public void setPulseColors(boolean colorizedMedia, int[] colors) {
         if (mRenderer != null) {
             mRenderer.setColors(colorizedMedia, colors);
