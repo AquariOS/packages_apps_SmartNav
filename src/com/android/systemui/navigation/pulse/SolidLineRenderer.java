@@ -37,7 +37,7 @@ import android.os.UserHandle;
 import android.provider.Settings;
 
 import com.android.internal.util.NotificationColorUtil;
-import com.android.systemui.navigation.pulse.PulseController.PulseObserver;
+import com.android.systemui.navigation.pulse.PulseController.PulseHost;
 import com.android.systemui.navigation.utils.ColorAnimator;
 
 public class SolidLineRenderer extends Renderer implements ColorAnimator.ColorAnimationListener {
@@ -64,7 +64,7 @@ public class SolidLineRenderer extends Renderer implements ColorAnimator.ColorAn
 
     private PulseController mController;
 
-    public SolidLineRenderer(Context context, Handler handler, PulseObserver callback,
+    public SolidLineRenderer(Context context, Handler handler, PulseHost callback,
             PulseController controller) {
         super(context, handler, callback);
         mController = controller;
